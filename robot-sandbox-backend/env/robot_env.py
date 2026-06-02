@@ -4,159 +4,257 @@ from gymnasium import spaces
 import numpy as np
 
 class RobotEnvironment(gym.Env):
-    def __init__(self, render_mode=None):
+    def __init__(self):
         super().__init__()
+
         self.arena_size = 10.0
+        self.lidar_max_distance = 5.0
+        self.max_vel = 1.0
+        self.current_step = 0  
+        self.dt = 0.1  # Unified time step for kinematic consistency
+
+        self.cylindrical_obstacles = np.empty((0, 3), dtype=np.float32)
+        self.laser_list = [self.lidar_max_distance] * 12
+
+        self.pos = np.array([0.0, 0.0], dtype=np.float32)
+        self.goal = np.array([0.0, 0.0], dtype=np.float32)
+
         self.robo_radius = 0.2
         self.goal_radius = 0.2
-        self.laser_max_distance = 5.0
-        
-        self.robo_pos = np.array([0.0, 0.0], dtype=np.float32)
-        self.goal_pos = np.array([0.0, 0.0], dtype=np.float32)
-        self.obstacles = np.empty((0, 3), dtype=np.float32)
-        self.laser_list = [self.laser_max_distance] * 16
-        
-        # 🚀 FIX: Calibrate observation bounds to accommodate relative vectors safely
-        # Max distance across a 10x10 quadrant arena can span up to 20 units delta
-        self.low_bounds = np.array(
-            [-self.arena_size * 1.5, -self.arena_size * 1.5] +  # Robot absolute X, Y
-            [-self.arena_size * 2.5, -self.arena_size * 2.5] +  # Relative Goal Vector delta X, Y
-            [0.0] * 16,                                         # 16-channel LIDAR
+
+        self.linear_velocity = 0.0
+        self.angular_velocity = 0.0
+        self.theta = 0.0
+
+        self.lidar_offsets = np.linspace(-np.pi, np.pi, 12, endpoint=False, dtype=np.float32)
+
+        self.action_space = spaces.Box(
+            low=-1.0, high=1.0, shape=(2,), dtype=np.float32
+        )
+
+        # Extended observation bounds matching your output dimensions (16 elements total)
+        low_bound = np.array(
+            [-self.arena_size * 2.5] * 2 +
+            [-self.max_vel, -1.0] +
+            [0.0] * 12,
             dtype=np.float32
         )
-        self.high_bounds = np.array(
-            [self.arena_size * 1.5, self.arena_size * 1.5] +
-            [self.arena_size * 2.5, self.arena_size * 2.5] +
-            [self.laser_max_distance * 1.5] * 16,
+        high_bound = np.array(
+            [self.arena_size * 2.5] * 2 +
+            [self.max_vel, 1.0] +
+            [self.lidar_max_distance] * 12,
             dtype=np.float32
         )
-        
-        self.action_space = spaces.Box(low=-0.5, high=0.5, shape=(2,), dtype=np.float32)
-        self.observation_space = spaces.Box(low=self.low_bounds, high=self.high_bounds, shape=(20,), dtype=np.float32)
 
-        self.render_mode = render_mode
-        self.current_step = 0
-        
-        self.total_successes = 0
-        self.total_crashes = 0
-        self.episode_reward = 0.0
+        self.observation_space = spaces.Box(
+            low=low_bound, high=high_bound, shape=(16,), dtype=np.float32
+        )
 
-    def _random_in_arena(self):
-        return np.random.uniform(-self.arena_size, self.arena_size, size=(2,)).astype(np.float32)
-    
+        # Precompute the standard range of steps along each LiDAR ray to save CPU allocation cycles
+        self._lidar_steps = np.linspace(self.robo_radius, self.lidar_max_distance, 25, dtype=np.float32)
+
+    def _random_coord_in_arena(self):
+        return np.random.uniform(
+            -self.arena_size + 0.2, self.arena_size - 0.2, size=(2,)
+        ).astype(np.float32)
+
     def _is_safe(self, pos):
-        if abs(pos[0]) > self.arena_size or abs(pos[1]) > self.arena_size:
+        # 🔥 OPTIMIZED: Vectorized boundary check
+        if np.any(np.abs(pos) > self.arena_size):
             return False
-        for obs in self.obstacles:
-            center = obs[:2]
-            radius = obs[2]
-            distance = np.linalg.norm(pos - center)
-            if distance < (radius + self.robo_radius):
-                return False
+
+        if len(self.cylindrical_obstacles) == 0:
+            return True
+
+        # 🔥 OPTIMIZED: Blazing fast matrix distance calculation
+        obs_centers = self.cylindrical_obstacles[:, :2]
+        obs_radii = self.cylindrical_obstacles[:, 2]
+        
+        distances = np.linalg.norm(obs_centers - pos, axis=1)
+        if np.any(distances < (obs_radii + self.robo_radius)):
+            return False
         return True
-        
+    
     def _compute_lidar(self):
-        laser_list = []
-        angle_list = np.linspace(0, 2 * np.pi, 16, endpoint=False)
-        step_list = np.linspace(self.robo_radius, self.laser_max_distance, 50)
+        # 🔥 HIGHLY OPTIMIZED: Complete extraction of nested Python loops using matrix broadcasting
+        beam_angles = self.theta + self.lidar_offsets  # Shape: (12,)
         
-        for angle in angle_list:
-            for step in step_list:
-                offset = np.array([np.cos(angle) * step, np.sin(angle) * step], dtype=np.float32)
-                check_point = self.robo_pos + offset
-                if not self._is_safe(check_point):
-                    laser_list.append(step)
-                    break
-            else: 
-                laser_list.append(self.laser_max_distance)
-        self.laser_list = laser_list
+        # Build 2D grid vectors via outer products (12, 1) * (1, 25)
+        cos_components = np.cos(beam_angles)[:, np.newaxis] * self._lidar_steps[np.newaxis, :]
+        sin_components = np.sin(beam_angles)[:, np.newaxis] * self._lidar_steps[np.newaxis, :]
+        
+        # Broadcast offsets directly against the robot's coordinates -> Shape: (12, 25, 2)
+        points_x = self.pos[0] + cos_components
+        points_y = self.pos[1] + sin_components
+        ray_points = np.stack([points_x, points_y], axis=-1)
+
+        # Matrix Boundary Collision Checks -> Shape: (12, 25)
+        hit_boundary = np.any(np.abs(ray_points) > self.arena_size, axis=-1)
+
+        # Matrix Obstacle Collision Checks via Broadcasting
+        if len(self.cylindrical_obstacles) > 0:
+            obs_centers = self.cylindrical_obstacles[:, :2]  # Shape: (N, 2)
+            obs_radii = self.cylindrical_obstacles[:, 2]      # Shape: (N,)
+
+            # Reshape tensors to calculate every single intersection combination simultaneously
+            # (12, 25, 1, 2) minus (1, 1, N, 2)
+            delta_matrix = ray_points[:, :, np.newaxis, :] - obs_centers[np.newaxis, np.newaxis, :, :]
+            distance_matrix = np.linalg.norm(delta_matrix, axis=-1)  # Shape: (12, 25, N)
+            
+            hit_obstacle = np.any(distance_matrix <= obs_radii[np.newaxis, np.newaxis, :], axis=-1)  # Shape: (12, 25)
+        else:
+            hit_obstacle = np.zeros((12, 25), dtype=bool)
+
+        # Combine collision maps
+        all_collisions = hit_obstacle | hit_boundary  # Shape: (12, 25)
+
+        # Determine the earliest true hit index along the steps axis
+        has_hit = np.any(all_collisions, axis=1)
+        first_hit_indices = np.argmax(all_collisions, axis=1)
+
+        # Map index hits back to their actual spatial distances
+        self.laser_list = np.where(
+            has_hit, 
+            self._lidar_steps[first_hit_indices], 
+            self.lidar_max_distance
+        ).astype(np.float32).tolist()
 
     def _get_obs(self):
         self._compute_lidar()
-        # 🚀 FIX: Feed the network a relative displacement vector instead of absolute coordinates
-        # This provides an explicit directional heading that remains highly granular near the goal
-        relative_goal_vector = self.goal_pos - self.robo_pos
-        return np.concatenate([self.robo_pos, relative_goal_vector, self.laser_list], dtype=np.float32)
+        goal_vector = self.goal - self.pos
 
-    def set_interactive_layout(self, robot_pos, goal_pos, obstacles_list):
-        self.robo_pos = np.array(robot_pos, dtype=np.float32)
-        self.goal_pos = np.array(goal_pos, dtype=np.float32)
-        self.obstacles = np.array(obstacles_list, dtype=np.float32)
-        self.current_step = 0
-        self.episode_reward = 0.0
-        return self._get_obs()
+        c, s = np.cos(self.theta), np.sin(self.theta)
+        goal_forward = c * goal_vector[0] + s * goal_vector[1]
+        goal_sideways = -s * goal_vector[0] + c * goal_vector[1]
+
+        return np.concatenate([
+            np.array([goal_forward, goal_sideways], dtype=np.float32),
+            np.array([self.linear_velocity, self.angular_velocity], dtype=np.float32),
+            np.array(self.laser_list, dtype=np.float32)
+        ]).astype(np.float32)
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.current_step = 0
-        self.episode_reward = 0.0
-        
-        number_of_obstacles = np.random.randint(5, 12)
-        obstacle_list = []
-        for _ in range(number_of_obstacles):
-            x, y = self._random_in_arena()
-            radius = np.random.uniform(0.4, 1.2)
-            obstacle_list.append([x, y, radius])
+        self.linear_velocity = 0.0
+        self.angular_velocity = 0.0
+        self.theta = 0.0
 
-        self.obstacles = np.array(obstacle_list, dtype=np.float32)
-        
-        while True:
-            robo_pos = self._random_in_arena()
-            if self._is_safe(robo_pos):
-                self.robo_pos = robo_pos
-                break
-                
-        while True:
-            goal_pos = self._random_in_arena()
-            if self._is_safe(goal_pos) and np.linalg.norm(self.robo_pos - goal_pos) > 4.0:
-                self.goal_pos = goal_pos
-                break
+        # 🕹️ EVALUATION OVERRIDE: Check if custom map options are specified by the UI
+        if options and "testing_config" in options:
+            config = options["testing_config"]
+            
+            # Map configuration properties natively into numpy structures
+            self.pos = np.array(config["start_pos"], dtype=np.float32)
+            self.goal = np.array(config["goal_pos"], dtype=np.float32)
+            self.theta = float(config.get("start_theta", 0.0))
+            
+            obstacles_list = config.get("obstacles", [])
+            if len(obstacles_list) > 0:
+                self.cylindrical_obstacles = np.array(obstacles_list, dtype=np.float32)
+            else:
+                self.cylindrical_obstacles = np.empty((0, 3), dtype=np.float32)
+        else:
+            # 🎲 TRAINING DEFAULT: Fall back to random procedural generation
+            num_obstacles = np.random.randint(4, 7)
+            self.cylindrical_obstacles = np.array([
+                [z[0], z[1], np.random.uniform(0.4, 1.2)] 
+                for z in [self._random_coord_in_arena() for _ in range(num_obstacles)]
+            ], dtype=np.float32)
+
+            while True:
+                robo_pos = self._random_coord_in_arena()
+                if self._is_safe(robo_pos):
+                    self.pos = robo_pos
+                    break
+
+            while True:
+                goal_pos = self._random_coord_in_arena()
+                if self._is_safe(goal_pos) and np.linalg.norm(goal_pos - self.pos) > 4.0:
+                    self.goal = goal_pos
+                    break
 
         return self._get_obs(), {}
-        
+    
+    
     def step(self, action):
-        truncated = False
+        reward = -0.05  
         terminated = False
-        
-        # 🚀 FIX: Increase the step penalty slightly to discourage lingering behaviors
-        reward = -0.15 
+        truncated = False
         self.current_step += 1
 
-        old_dis = np.linalg.norm(self.goal_pos - self.robo_pos)
-        new_pos = self.robo_pos + (action*0.25)
-        new_dis = np.linalg.norm(new_pos - self.goal_pos)
+        if self.current_step >= 500:
+            truncated = True
 
-        # 🚀 FIX: Atomic safety evaluation. Verify the move before updating state coordinates
+        old_goal_dis = np.linalg.norm(self.goal - self.pos)
+
+        # Explicit Euler Integration 
+        self.linear_velocity += action[0] * self.dt
+        self.linear_velocity = np.clip(self.linear_velocity, 0.0, self.max_vel) 
+
+        self.angular_velocity += action[1] * self.dt
+        self.angular_velocity = np.clip(self.angular_velocity, -1.0, 1.0)
+
+        self.theta += self.angular_velocity * self.dt
+        self.theta = (self.theta + np.pi) % (2 * np.pi) - np.pi
+
+        self.linear_velocity *= 0.98
+        self.angular_velocity *= 0.95
+
+        dx = np.cos(self.theta) * self.linear_velocity * self.dt
+        dy = np.sin(self.theta) * self.linear_velocity * self.dt
+        new_pos = self.pos + np.array([dx, dy], dtype=np.float32)
+
         if not self._is_safe(new_pos):
-            reward -= 120.0
-            self.total_crashes += 1
+            reward -= 100.0  
             terminated = True
-            self.episode_reward += reward
             return self._get_obs(), reward, terminated, truncated, {}
 
-        # Move committed only if safe
-        self.robo_pos = new_pos
+        self.pos = new_pos
+        new_goal_dis = np.linalg.norm(self.goal - self.pos)
+        
+        # 1. Distance Progress Reward
+        reward += (old_goal_dis - new_goal_dis) * 10.0
 
-        # 🚀 FIX: Balanced Potential Field Reward formulation
-        # Dense directional progress combined with an absolute proximity benefit
-        progress = old_dis - new_dis
-        reward += progress * 20.0     # Incremental movement reward
-        reward -= new_dis * 0.2       # Continuous distance penalty (pulls the robot forward)
+        # 2. Heading Alignment Reward
+        goal_vector = self.goal - self.pos
+        goal_angle = np.arctan2(goal_vector[1], goal_vector[0])
+        angle_error = abs(np.arctan2(np.sin(goal_angle - self.theta), np.cos(goal_angle - self.theta)))
+        heading_reward = (np.pi - angle_error) / np.pi
+        reward += heading_reward * 0.1  
 
-        # Goal reached check
-        if new_dis < (self.robo_radius + self.goal_radius):
-            reward += 200.0           # Increased finishing bonus
-            self.total_successes += 1
+        # 3. LiDAR Obstacle Avoidance Penalty
+        min_lidar = min(self.laser_list)
+        safety_clearance = 1.4  
+        
+        if min_lidar < safety_clearance:
+            proximity_severity = (safety_clearance - min_lidar) / (safety_clearance - self.robo_radius)
+            reward -= (proximity_severity ** 2) * 0.5
+
+        # Terminal Victory Jackpot
+        reached_goal = new_goal_dis <= (self.robo_radius + self.goal_radius)
+        if reached_goal:
+            reward += 300.0
             terminated = True
 
-        if self.current_step >= 200:
-            truncated = True
-            
-        self.episode_reward += reward
-        return self._get_obs(), reward, terminated, truncated, {}
+        info = {
+            "is_success": bool(reached_goal),
+            "render_state": {
+                "robot": {
+                    "x": float(self.pos[0]),
+                    "y": float(self.pos[1]),
+                    "theta": float(self.theta)
+                },
+                "goal": {
+                    "x": float(self.goal[0]),
+                    "y": float(self.goal[1])
+                },
+                "lidar": [float(x) for x in self.laser_list],
+                "obstacles": [
+                    {"x": float(obs[0]), "y": float(obs[1]), "radius": float(obs[2])}
+                    for obs in self.cylindrical_obstacles
+                ]
+            }
+        }
 
-    def render(self):
-        pass
-
-    def close(self):
-        pass
+        return self._get_obs(), float(reward), terminated, truncated, info
