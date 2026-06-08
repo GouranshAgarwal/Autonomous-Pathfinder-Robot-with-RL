@@ -3,10 +3,9 @@
 An industry-grade, microservice-decoupled simulation platform for autonomous robotic navigation. The agent trains via continuous Proximal Policy Optimization (PPO) inside a high-performance, custom Python environment and streams live operational telemetry to an interactive, hardware-accelerated 3D web dashboard.
 
 <div align="center">
-  <video width="100%" autoplay loop muted playsinline>
-    <source src="https://github.com/GouranshAgarwal/Autonomous-Pathfinder-Robot-with-RL/raw/main/testing_video.mp4" type="video/mp4">
-    Your browser does not support the video tag.
-  </video>
+  <a href="https://www.youtube.com/watch?v=Rjy0Xhp2cj4" target="_blank">
+    <img src="https://img.youtube.com/vi/Rjy0Xhp2cj4/maxresdefault.jpg" alt="Autonomous Robot RL Simulation Demo" width="100%">
+  </a>
 </div>
 
 ---
