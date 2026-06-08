@@ -1,115 +1,99 @@
 # Autonomous Pathfinder Robot with Reinforcement Learning
 
-## 🎯 Project Overview
+An industry-grade, microservice-decoupled simulation platform for autonomous robotic navigation. The agent trains via continuous Proximal Policy Optimization (PPO) inside a high-performance, custom Python environment and streams live operational telemetry to an interactive, hardware-accelerated 3D web dashboard.
 
-This project implements an autonomous robot navigation system powered by Reinforcement Learning. The robot learns to navigate complex environments, avoid obstacles, and reach target destinations through continuous training and reward-based feedback mechanisms.
-
----
-
-## 📋 What We Are Doing
-
-- **Autonomous Robot Navigation**: Building an RL-based agent that learns optimal pathfinding strategies
-- **Environment Simulation**: Creating a sandbox environment to train and test the robot's navigation capabilities
-- **Real-time Telemetry**: Implementing WebSocket-based telemetry for live monitoring and visualization
-- **Model Training**: Developing and refining the RL model to improve navigation behavior and obstacle avoidance
+<div align="center">
+  <video width="100%" autoplay loop muted playsinline>
+    <source src="https://github.com/GouranshAgarwal/Autonomous-Pathfinder-Robot-with-RL/raw/main/testing_video.mp4" type="video/mp4">
+    Your browser does not support the video tag.
+  </video>
+</div>
 
 ---
 
-## 🔄 Approach
+## 🛠️ System Architecture & Design Choices
 
-### Architecture
-- **Decoupled Web Architecture**: Separation of concerns between backend simulation engine and frontend visualization
-  - **Backend** (`robot-sandbox-backend`): RL training engine, environment simulation, and robot control logic
-  - **Frontend** (`robot-sandbox-ui`): Real-time visualization and telemetry dashboard
+The platform is explicitly split into decoupled microservices to separate heavy algorithmic mathematics from graphic computation layers, minimizing communication blocks and system overhead.
 
-### Reinforcement Learning Strategy
-- **State Space**: Robot position, velocity, sensor readings (distance to obstacles and target)
-- **Action Space**: Movement commands (forward, backward, rotate left, rotate right)
-- **Reward System**: Incentivizes reaching the goal while penalizing collisions and inefficient paths
-
-### Tech Stack
-- **Backend**: Python, Docker (54.5% JavaScript, 35.5% Python, 5.8% CSS, 2.8% Dockerfile, 1.4% HTML)
-- **Frontend**: JavaScript/React-based UI with WebSocket integration
-- **Communication**: WebSocket protocol for real-time telemetry streaming
-
----
-
-## 🚀 Advantages of Decoupled Architecture
-
-### Modularity & Maintainability
-- **Independent Development**: Backend training logic and frontend UI can be developed and deployed separately
-- **Scalability**: Easy to scale individual components without affecting others
-- **Testing**: Isolated testing for each module improves code quality
-
-### Versatility
-- **Pluggable Components**: Different RL algorithms can be tested by only modifying the backend
-- **Reusable UI**: The telemetry dashboard can visualize multiple robot simulations simultaneously
-- **Flexible Deployment**: Backend can run on high-compute servers; frontend on lightweight clients
-
-### Decoupled WebSocket Telemetry
-- **Real-time Monitoring**: Live streaming of robot metrics without tight coupling between systems
-- **Asynchronous Communication**: Non-blocking telemetry prevents training lag
-- **Multiple Clients**: Multiple front-end instances can connect to a single backend simultaneously
-- **Easy Integration**: WebSocket APIs can be integrated with external monitoring tools or custom dashboards
-
----
-
-## 📊 Current Observations & Known Issues
-
-### Goal-Reaching Behavior
-**Issue**: The model approaches the goal quickly but **stops at a certain distance before reaching it**
-- **Root Cause**: Imbalanced reward-penalty system
-- **Details**: The penalty for collision may be too aggressive or the goal reward too weak, causing the agent to exhibit overly cautious behavior near the target
-- **Impact**: Robot fails to complete successful goal captures
-
-### Obstacle Avoidance Behavior
-**Issue**: Inconsistent obstacle handling
-- **Straight-line Obstacles**: If an obstacle is directly in the path, the robot **collides** instead of maneuvering around it
-- **Angled Obstacles**: Robot successfully avoids obstacles that are only slightly in the way
-- **Root Cause**: Insufficient penalty diversity and reward shaping for obstacle-specific scenarios
-
----
-
-## 🔧 Future Improvements
-
-### Short-term
-- [ ] Fine-tune reward-penalty ratios for balanced goal-seeking behavior
-- [ ] Implement separate reward weights for direct vs. angled obstacles
-- [ ] Add reward shaping to encourage earlier obstacle detection and response
-
-### Medium-term
-- [ ] Integrate advanced RL algorithms (PPO, DQN improvements)
-- [ ] Expand environment complexity (multiple obstacles, dynamic targets)
-- [ ] Implement transfer learning for faster convergence
-
-### Long-term
-- [ ] Real robot integration and deployment
-- [ ] Multi-agent coordination
-- [ ] Advanced path planning with dynamic re-routing
-
----
-
-## 📦 Directory Structure
-
-```
-Autonomous-Pathfinder-Robot-with-RL/
-├── robot-sandbox-backend/      # RL engine & simulation
-├── robot-sandbox-ui/           # Web-based telemetry dashboard
-└── Readme.md
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          DOCKER COMPOSE NETWORK                             │
+│                                                                             │
+│  ┌─────────────────────────┐               ┌─────────────────────────────┐  │
+│  │     PYTHON BACKEND      │               │       REACT FRONTEND        │  │
+│  │ ┌─────────────────────┐ │               │ ┌─────────────────────────┐ │  │
+│  │ │ Custom Gymnasium Env│ │  JSON Stream  │ │   Asynchronous Custom   │ │  │
+│  │ │ NumPy Vector Loops  │ │ ────────────> │ │    WebSocket Hooks      │ │  │
+│  │ └──────────┬──────────┘ │  (Low-Latency)│ └────────────┬────────────┘ │  │
+│  │            │ State Vectors              │              │ State Matrix │  │
+│  │            ▼            │               │              ▼              │  │
+│  │ ┌─────────────────────┐ │               │ ┌─────────────────────────┐ │  │
+│  │ │ PPO Policy Network  │ │               │ │   React-Three-Fiber     │ │  │
+│  │ │  (PyTorch Inference)│ │               │ │     (3D Canvas)         │ │  │
+│  │ └─────────────────────┘ │               │ └─────────────────────────┘ │  │
+│  └─────────────────────────┘               └─────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
----
-
-## 🚀 Getting Started
-
-*Detailed setup instructions will be added to respective backend and frontend README files.*
+* **The Simulation Engine (Backend):** Built on a custom **Gymnasium** environment. To guarantee high frame-per-second exploration throughput during training, all spatial calculations—including boundary limits, obstacle proximities, and 12-ray continuous LiDAR tracking—are evaluated natively using **NumPy matrix broadcasting** instead of iterative loops.
+* **The Streaming Pipeline (Network):** Telemetry packets (coordinate states, linear/angular velocities, active step rewards, and raw laser arrays) are serialized into light JSON payloads and pushed over an asynchronous duplex **FastAPI WebSocket** channel.
+* **The Telemetry Visualization (Frontend):** A Single Page Application built on **React** that feeds incoming WebSocket state frames into custom state hooks, updating an interactive, hardware-accelerated **React-Three-Fiber (Three.js)** canvas at low latency.
 
 ---
 
-## 📝 License
+## 🧠 Algorithmic Bottlenecks & Self-Authored Solutions
 
-Open source project - contributions welcome!
+### 1. Mathematical Resolution of the Boundary Local Minimum Trap
+During early training iterations, the navigation agent suffered from structural paralysis when encountering continuous obstacle configurations. Because the destination coordinates lay directly beyond a solid wall, a traditional inverse-distance reward landscape created an artificial local minimum. The agent maximized rewards by standing perfectly still and staring directly at the target, as turning around or backing away incurred steep immediate negative distance rewards.
+
+To break this mathematical deadlock, the environment reward function was refactored to introduce a **Dynamic Heading Suppression Modifier** linked to an **Exponential Proximity Scaling Penalty**. 
+
+The dense reward calculation per timestep $t$ is formulated as follows:
+
+$$R_t = -0.1 + 10 \cdot (d_{\text{old}} - d_{\text{new}}) + \tilde{R}_{\text{heading}} - P_{\text{proximity}}$$
+
+Where:
+* $-0.1$ is a rigid step penalty enforcing time-optimal trajectories and punishing stagnation.
+* $d$ represents the Euclidean distance from the robot center to the target coordinate.
+
+The modified heading alignment tracking reward $\tilde{R}_{\text{heading}}$ dynamically chokes out positive reinforcement if the robot faces an obstacle block directly, forcing the policy to seek alternative angles:
+
+$$\tilde{R}_{\text{heading}} = \begin{cases} 
+0.2 \cdot \left(\frac{\pi - \theta_{\text{error}}}{\pi}\right) \cdot d_{\min} & \text{if } d_{\min} < 1.0 \\
+0.2 \cdot \left(\frac{\pi - \theta_{\text{error}}}{\pi}\right) & \text{otherwise}
+\end{cases}$$
+
+The exponential proximity barrier penalty $P_{\text{proximity}}$ outcompetes forward distance motivation as the robot approaches a danger radius, transforming the obstacle boundaries into aggressive repulsors:
+
+$$P_{\text{proximity}} = \begin{cases} 
+2.0 \cdot \left(\frac{1.4 - d_{\min}}{1.4 - r_{\text{robot}}}\right)^2 & \text{if } d_{\min} < 1.4 \\
+0 & \text{otherwise}
+\end{cases}$$
+
+Where $d_{\min}$ represents the minimum distance reading returned across the 12-ray LiDAR array and $r_{\text{robot}}$ is the structural radius of the agent ($0.2\text{m}$).
+
+### 2. Multi-Stage Container Size Optimization
+Deep learning pipelines typically inherit massive CUDA, cuDNN, and system development tools, causing standard deployment images to balloon well beyond 4GB. To make this stack cloud-ready for standard, cost-effective instances, two container techniques were deployed:
+* **Backend:** Intercepted downstream dependency layers by explicitly pointing the package manager to pre-compiled x86 pure CPU wheel binaries hosted directly by PyTorch, bypassing heavy graphic hardware overhead.
+* **Frontend:** Implemented a multi-stage Docker build process. A Node.js container compiles the static production distribution bundles before transferring the compiled directories onto an ultra-lightweight, hardened Nginx Alpine image, purging the heavy node modules directory from the final image context.
 
 ---
 
-**Built with ❤️ for autonomous robotics and reinforcement learning**
+## ⚙️ Deployment & Execution
+
+The entire platform is fully containerized and orchestrated via Docker Compose.
+
+### Prerequisites
+Ensure your host machine has Docker and Docker Compose installed.
+
+### Spin up the Microservices
+Clone the repository and execute the following deployment command from the root directory:
+
+```bash
+docker-compose up --build
+```
+
+Once the compilation layer completes:
+* The interactive 3D Telemetry Dashboard will be hosted at: `http://localhost:3000`
+* The Asynchronous Python RL Server will be bound and listening to: `ws://localhost:8000`
+```
